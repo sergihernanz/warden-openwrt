@@ -1,0 +1,39 @@
+#!/bin/sh /etc/rc.common
+# Starts after network/dnsmasq/firewall are up, so genrules can rely on
+# `nft` and `/etc/init.d/dnsmasq restart` both working.
+START=95
+STOP=10
+USE_PROCD=1
+
+KFW_TABLE="kidsfirewall"
+
+boot() {
+	# give network/firewall/dnsmasq a moment to fully settle on first boot
+	sleep 5
+	start
+}
+
+start_service() {
+	/usr/sbin/kidsfirewall-genrules
+
+	procd_open_instance
+	procd_set_param command /usr/sbin/kidsfirewall-monitor
+	procd_set_param respawn ${respawn_threshold:-3600} ${respawn_timeout:-5} ${respawn_retry:-0}
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	nft delete table inet "$KFW_TABLE" 2>/dev/null
+	rm -f /tmp/dnsmasq.d/kidsfirewall.conf
+	[ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq reload >/dev/null 2>&1
+}
+
+reload_service() {
+	/usr/sbin/kidsfirewall-genrules
+}
+
+service_triggers() {
+	procd_add_reload_trigger kidsfirewall
+}

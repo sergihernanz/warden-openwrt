@@ -1,0 +1,13 @@
+{
+	"admin/network/kidsfirewall": {
+		"title": "Kids Firewall",
+		"order": 65,
+		"action": {
+			"type": "view",
+			"path": "kidsfirewall/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-kidsfirewall" ]
+		}
+	}
+}

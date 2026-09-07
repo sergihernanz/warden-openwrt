@@ -1,0 +1,6 @@
+bin/
+build_dir/
+staging_dir/
+dl/
+*.ipk
+.DS_Store

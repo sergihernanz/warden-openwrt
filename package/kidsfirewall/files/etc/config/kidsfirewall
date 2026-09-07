@@ -1,0 +1,79 @@
+
+config global 'global'
+	option enabled '1'
+	option check_interval '60'
+
+# Example device — edit the mac (and add more 'device' sections) via LuCI
+# or by hand. Set enabled '0' or delete the block entirely once you've
+# added your own.
+config device 'example_device'
+	option name 'Example Device'
+	option mac '00:11:22:33:44:55'
+	option enabled '0'
+
+config service 'instagram'
+	option name 'Instagram'
+	list domain 'instagram.com'
+	list domain 'cdninstagram.com'
+
+config service 'tiktok'
+	option name 'TikTok'
+	list domain 'tiktok.com'
+	list domain 'tiktokcdn.com'
+	list domain 'tiktokv.com'
+	list domain 'musical.ly'
+
+config service 'youtube'
+	option name 'YouTube'
+	list domain 'youtube.com'
+	list domain 'youtu.be'
+	list domain 'googlevideo.com'
+	list domain 'ytimg.com'
+
+config service 'facebook'
+	option name 'Facebook'
+	list domain 'facebook.com'
+	list domain 'fbcdn.net'
+
+config service 'snapchat'
+	option name 'Snapchat'
+	list domain 'snapchat.com'
+	list domain 'sc-cdn.net'
+
+config service 'roblox'
+	option name 'Roblox'
+	list domain 'roblox.com'
+	list domain 'rbxcdn.com'
+
+config service 'twitch'
+	option name 'Twitch'
+	list domain 'twitch.tv'
+	list domain 'ttvnw.net'
+
+config service 'netflix'
+	option name 'Netflix'
+	list domain 'netflix.com'
+	list domain 'nflxvideo.net'
+
+# Example rule — disabled by default, shown for reference. Add real ones
+# through LuCI (Network > Kids Firewall) or by copying this block.
+#
+# config rule
+#	option device 'example_device'
+#	option service 'instagram'
+#	option mode 'budget'
+#	option limit_minutes '30'
+#	option period 'daily'
+#
+# config rule
+#	option device 'example_device'
+#	option mode 'schedule'
+#	option start_time '08:00'
+#	option stop_time '20:00'
+#	list days 'mon'
+#	list days 'tue'
+#	list days 'wed'
+#	list days 'thu'
+#	list days 'fri'
+#	list days 'sat'
+#	list days 'sun'

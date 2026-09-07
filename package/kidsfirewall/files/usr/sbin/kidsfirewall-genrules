@@ -1,0 +1,253 @@
+#!/bin/sh
+# Regenerates the `inet kidsfirewall` nftables table and the dnsmasq
+# nftset= snippet (keeps dest_<service> sets populated from DNS lookups --
+# not per-device; device scoping is entirely in the nft rules) from
+# /etc/config/kidsfirewall, and loads them. Run on service start/reload and
+# whenever the UCI config changes.
+#
+# Does NOT touch schedule/budget *set membership* — that's owned by the
+# long-running kidsfirewall-monitor daemon, which re-syncs on its own next
+# tick after we (re)create the (now-empty) dynamic sets below.
+
+. /lib/functions.sh
+. /usr/share/kidsfirewall/functions.sh
+
+mkdir -p "$KFW_RUN_DIR" "$KFW_USAGE_DIR"
+
+config_load kidsfirewall
+
+ENABLED=$(uci -q get kidsfirewall.global.enabled)
+[ -n "$ENABLED" ] || ENABLED=1
+
+if [ "$ENABLED" != "1" ]; then
+	kfw_log "disabled (global.enabled=0) — removing table and dnsmasq snippet"
+	nft delete table inet "$KFW_TABLE" 2>/dev/null
+	rm -f "$KFW_DNSMASQ_FILE"
+	[ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq reload >/dev/null 2>&1
+	exit 0
+fi
+
+RULE_IDS=""
+kfw_collect_rule() { RULE_IDS="$RULE_IDS $1"; }
+config_foreach kfw_collect_rule rule
+
+# The minimal OpenWRT 'dnsmasq' package (as opposed to 'dnsmasq-full') is
+# compiled without nftset= support. Emitting nftset= lines it can't parse
+# makes dnsmasq refuse to (re)start entirely -- taking down DNS for the
+# whole LAN, not just the configured devices. Detect this up front and
+# simply never emit those lines if unsupported: block-mode DNS blocking
+# (address=) still works fine either way; budget-mode traffic accounting
+# and the nft-level backstop just won't have anything to match against
+# unless a static CIDR list is configured for that service.
+DNSMASQ_VER_OUT=$(dnsmasq --version 2>&1)
+case "$DNSMASQ_VER_OUT" in
+	*no-nftset*) KFW_DNSMASQ_NFTSET=0 ;;
+	*nftset*) KFW_DNSMASQ_NFTSET=1 ;;
+	*) KFW_DNSMASQ_NFTSET=0 ;;
+esac
+if [ "$KFW_DNSMASQ_NFTSET" != 1 ]; then
+	kfw_log "WARNING: dnsmasq lacks nftset= support (install 'dnsmasq-full' in place of 'dnsmasq'). Skipping nftset= generation -- without it, block/budget rules for any service have NOTHING to match against (enforcement is nft-only, keyed off dnsmasq-populated destination IPs) unless you manually populate a static CIDR list for that service (service.cidr)."
+fi
+
+SEEN_SERVICES=""
+SEEN_COUNTERS=""
+SETDECLS=""
+COUNTER_DECLS=""
+BLOCK_RULES=""
+COUNT_RULES=""
+STATIC_ELEMENTS=""
+DNSMASQ_LINES=""
+HAVE_SCHEDULE=0
+HAVE_BUDGET=0
+
+kfw_seen() {
+	case " $SEEN_SERVICES " in
+		*" $1 "*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Declares dest_<svc>[6][_static] sets + emits the dnsmasq nftset= lines
+# that keep them populated. Idempotent per service.
+kfw_declare_service() {
+	svc="$1"
+	kfw_seen "$svc" && return 0
+	SEEN_SERVICES="$SEEN_SERVICES $svc"
+
+	sname=$(uci -q get kidsfirewall.$svc.name)
+	[ -n "$sname" ] || sname="$svc"
+	ident=$(kfw_ident "$svc")
+
+	SETDECLS="$SETDECLS
+	set dest_${ident} { type ipv4_addr; flags interval,timeout; }
+	set dest_${ident}6 { type ipv6_addr; flags interval,timeout; }
+	set block_${ident} { type ether_addr; }"
+
+	if [ "$KFW_DNSMASQ_NFTSET" = 1 ]; then
+		# Two separate nftset= lines (one per IP version) rather than
+		# comma-combining a 4# and 6# spec on one line: every verified
+		# working example in dnsmasq's own docs/discussion does it this
+		# way, and there's a known history of obscure nftset parsing bugs
+		# (see openwrt/openwrt#17548) -- not worth risking the untested
+		# combined form.
+		#
+		# NOTE: iterate via config_list_foreach, NOT `uci -q get ... | while
+		# read`. On this uci build, `uci get` on a list option prints all
+		# values space-joined on ONE line, not one per line -- the old code
+		# silently read "instagram.com cdninstagram.com" as a single
+		# "domain", producing an nftset= line dnsmasq could never match
+		# against anything. config_list_foreach calls back once per actual
+		# list element regardless of how `uci get` happens to format it.
+		kfw_emit_nftset() {
+			dom="$1"
+			[ -n "$dom" ] || return 0
+			echo "nftset=/${dom}/4#inet#${KFW_TABLE}#dest_${ident}" >> "$KFW_DNSMASQ_FILE.tmp.domains"
+			echo "nftset=/${dom}/6#inet#${KFW_TABLE}#dest_${ident}6" >> "$KFW_DNSMASQ_FILE.tmp.domains"
+		}
+		config_list_foreach "$svc" domain kfw_emit_nftset
+	fi
+
+	have_static=0
+	kfw_collect_cidr() {
+		cidr="$1"
+		[ -n "$cidr" ] || return 0
+		echo "$cidr" >> "$KFW_RUN_DIR/.static_${ident}.tmp"
+	}
+	config_list_foreach "$svc" cidr kfw_collect_cidr
+	if [ -s "$KFW_RUN_DIR/.static_${ident}.tmp" ]; then
+		have_static=1
+		SETDECLS="$SETDECLS
+	set dest_${ident}_static { type ipv4_addr; flags interval; }"
+		elems=""
+		while read -r cidr; do
+			[ -n "$cidr" ] || continue
+			if [ -n "$elems" ]; then elems="$elems, $cidr"; else elems="$cidr"; fi
+		done < "$KFW_RUN_DIR/.static_${ident}.tmp"
+		[ -n "$elems" ] && STATIC_ELEMENTS="$STATIC_ELEMENTS
+	add element inet $KFW_TABLE dest_${ident}_static { $elems }"
+		rm -f "$KFW_RUN_DIR/.static_${ident}.tmp"
+	fi
+
+	BLOCK_RULES="$BLOCK_RULES
+	ether saddr @block_${ident} ip daddr @dest_${ident} drop
+	ether saddr @block_${ident} ip6 daddr @dest_${ident}6 drop"
+	[ "$have_static" = 1 ] && BLOCK_RULES="$BLOCK_RULES
+	ether saddr @block_${ident} ip daddr @dest_${ident}_static drop"
+
+	kfw_log "service $svc ($sname) declared"
+	# stash whether a static set exists for this service, for the counting
+	# pass below (kfw_service_has_static reads this back)
+	[ "$have_static" = 1 ] && : > "$KFW_RUN_DIR/.static_${ident}.flag" || rm -f "$KFW_RUN_DIR/.static_${ident}.flag"
+}
+
+kfw_service_has_static() {
+	[ -f "$KFW_RUN_DIR/.static_$(kfw_ident "$1").flag" ]
+}
+
+rm -f "$KFW_DNSMASQ_FILE.tmp.domains"
+
+for rsec in $RULE_IDS; do
+	mode=$(uci -q get kidsfirewall.$rsec.mode)
+	devid=$(uci -q get kidsfirewall.$rsec.device)
+	[ -n "$devid" ] || { kfw_log "rule $rsec: missing device, skipping"; continue; }
+
+	devenabled=$(uci -q get kidsfirewall.$devid.enabled)
+	[ -n "$devenabled" ] || devenabled=1
+	[ "$devenabled" = "1" ] || continue
+
+	mac=$(uci -q get kidsfirewall.$devid.mac)
+	[ -n "$mac" ] || { kfw_log "rule $rsec: device $devid has no mac, skipping"; continue; }
+	mac=$(kfw_mac_lower "$mac")
+
+	case "$mode" in
+	block)
+		# Enforcement is nft-only (ether saddr @block_<svc> ip daddr
+		# @dest_<svc> drop, declared in kfw_declare_service) -- dnsmasq's
+		# address= directive has NO per-client/tag scoping at all (verified
+		# against the dnsmasq source and man page after a real router
+		# outage caused by assuming otherwise), so it can only ever block a
+		# domain for everyone, which is not what mode=block means here.
+		svc=$(uci -q get kidsfirewall.$rsec.service)
+		[ -n "$svc" ] || { kfw_log "rule $rsec: mode=block needs a service, skipping"; continue; }
+		kfw_declare_service "$svc"
+		ident=$(kfw_ident "$svc")
+		STATIC_ELEMENTS="$STATIC_ELEMENTS
+	add element inet $KFW_TABLE block_${ident} { $mac }"
+		;;
+	budget)
+		svc=$(uci -q get kidsfirewall.$rsec.service)
+		[ -n "$svc" ] || { kfw_log "rule $rsec: mode=budget needs a service, skipping"; continue; }
+		kfw_declare_service "$svc"
+		ident=$(kfw_ident "$svc")
+		did=$(kfw_ident "$devid")
+		cname="usage_${did}_${ident}"
+		case " $SEEN_COUNTERS " in
+			*" $cname "*) kfw_log "rule $rsec: duplicate device+service budget rule ($devid/$svc), skipping"; continue ;;
+		esac
+		SEEN_COUNTERS="$SEEN_COUNTERS $cname"
+		COUNTER_DECLS="$COUNTER_DECLS
+	counter ${cname} { }"
+		COUNT_RULES="$COUNT_RULES
+	ether saddr $mac ip daddr @dest_${ident} counter name \"${cname}\"
+	ether saddr $mac ip6 daddr @dest_${ident}6 counter name \"${cname}\""
+		kfw_service_has_static "$svc" && COUNT_RULES="$COUNT_RULES
+	ether saddr $mac ip daddr @dest_${ident}_static counter name \"${cname}\""
+		HAVE_BUDGET=1
+		;;
+	schedule)
+		HAVE_SCHEDULE=1
+		;;
+	*)
+		kfw_log "rule $rsec: unknown mode '$mode', skipping"
+		;;
+	esac
+done
+
+if [ -f "$KFW_DNSMASQ_FILE.tmp.domains" ]; then
+	sort -u "$KFW_DNSMASQ_FILE.tmp.domains" > "$KFW_DNSMASQ_FILE.tmp"
+	rm -f "$KFW_DNSMASQ_FILE.tmp.domains"
+else
+	: > "$KFW_DNSMASQ_FILE.tmp"
+fi
+
+{
+	echo "table inet $KFW_TABLE {"
+	echo "	set schedule_blocked { type ether_addr; }"
+	echo "$SETDECLS"
+	echo "$COUNTER_DECLS"
+	echo "	chain forward_kids {"
+	echo "		type filter hook forward priority filter - 5; policy accept;"
+	echo "		ether saddr @schedule_blocked drop"
+	echo "$BLOCK_RULES"
+	echo "$COUNT_RULES"
+	echo "	}"
+	echo "}"
+} > "$KFW_NFT_FILE.tmp"
+
+# Reset the table cleanly, then load. (Deleting first means removed
+# services/devices actually disappear instead of leaking stale sets.)
+nft delete table inet "$KFW_TABLE" 2>/dev/null
+if ! nft -f "$KFW_NFT_FILE.tmp"; then
+	kfw_log "ERROR: generated ruleset failed to load, see above; leaving table absent"
+	exit 1
+fi
+mv "$KFW_NFT_FILE.tmp" "$KFW_NFT_FILE"
+
+if [ -n "$STATIC_ELEMENTS" ]; then
+	printf '%s\n' "$STATIC_ELEMENTS" | while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		nft $line 2>/dev/null
+	done
+fi
+
+mv "$KFW_DNSMASQ_FILE.tmp" "$KFW_DNSMASQ_FILE"
+if [ -x /etc/init.d/dnsmasq ]; then
+	if ! grep -q '^[[:space:]]*option confdir' /etc/config/dhcp 2>/dev/null; then
+		uci -q set dhcp.@dnsmasq[0].confdir=/tmp/dnsmasq.d
+		uci -q commit dhcp
+	fi
+	mkdir -p /tmp/dnsmasq.d
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+fi
+
+kfw_log "ruleset (re)generated: $(echo "$SEEN_SERVICES" | wc -w) service(s), schedule_rules=$HAVE_SCHEDULE budget_rules=$HAVE_BUDGET"

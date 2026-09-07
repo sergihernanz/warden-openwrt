@@ -1,0 +1,16 @@
+#!/bin/sh
+# Runs once (via postinst / first boot). Makes sure dnsmasq is configured
+# to pick up /tmp/dnsmasq.d/*.conf, which is where kidsfirewall-genrules
+# drops its per-MAC domain-block snippet. Most default OpenWRT images
+# already set this; this just guarantees it.
+
+[ -f /etc/config/dhcp ] || exit 0
+
+if [ -z "$(uci -q get dhcp.@dnsmasq[0].confdir)" ]; then
+	uci -q set dhcp.@dnsmasq[0].confdir=/tmp/dnsmasq.d
+	uci -q commit dhcp
+fi
+
+mkdir -p /tmp/dnsmasq.d
+
+exit 0

@@ -1,0 +1,154 @@
+#!/bin/sh
+# Long-running daemon (supervised by procd, see /etc/init.d/kidsfirewall).
+# Every $check_interval seconds:
+#   - mode=schedule rules: compute whether each device is inside its
+#     allowed window right now, toggle membership in the `schedule_blocked`
+#     nft set accordingly.
+#   - mode=budget rules: sample the per-(device,service) nft counter, credit
+#     one tick's worth of usage if traffic was observed since the last
+#     sample, and once the limit is reached for the current period, toggle
+#     the device's MAC into that service's `block_<service>` set.
+#
+# This never touches the ruleset structure itself (sets/chains/counters) —
+# that's kidsfirewall-genrules' job, run on config changes. This daemon only
+# ever does `nft add|delete element`.
+
+. /lib/functions.sh
+. /usr/share/kidsfirewall/functions.sh
+
+mkdir -p "$KFW_USAGE_DIR"
+
+kfw_set_add() { nft add element inet "$KFW_TABLE" "$1" "{ $2 }" 2>/dev/null; }
+kfw_set_del() { nft delete element inet "$KFW_TABLE" "$1" "{ $2 }" 2>/dev/null; }
+
+kfw_counter_packets() {
+	nft list counter inet "$KFW_TABLE" "$1" 2>/dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p' | head -n1
+}
+
+kfw_table_exists() {
+	nft list table inet "$KFW_TABLE" >/dev/null 2>&1
+}
+
+kfw_tick() {
+	config_load kidsfirewall
+
+	CHECK_INTERVAL=$(uci -q get kidsfirewall.global.check_interval)
+	case "$CHECK_INTERVAL" in ''|*[!0-9]*) CHECK_INTERVAL=60 ;; esac
+
+	RULE_IDS=""
+	kfw_collect() { RULE_IDS="$RULE_IDS $1"; }
+	config_foreach kfw_collect rule
+
+	now_dow_token=$(kfw_dow_token "$(kfw_now_dow)")
+	now_min=$(kfw_now_minutes)
+
+	for rsec in $RULE_IDS; do
+		mode=$(uci -q get kidsfirewall.$rsec.mode)
+		devid=$(uci -q get kidsfirewall.$rsec.device)
+		[ -n "$devid" ] || continue
+
+		devenabled=$(uci -q get kidsfirewall.$devid.enabled)
+		[ -n "$devenabled" ] || devenabled=1
+		[ "$devenabled" = "1" ] || continue
+
+		mac=$(uci -q get kidsfirewall.$devid.mac)
+		[ -n "$mac" ] || continue
+		mac=$(kfw_mac_lower "$mac")
+
+		case "$mode" in
+		schedule)
+			days_listed=0
+			day_ok=0
+			# config_list_foreach, not `uci get ... | while read`: on this
+			# uci build, `uci get` on a list option prints all values
+			# space-joined on one line rather than one per line, so the
+			# old code compared "mon tue wed" as a single token and never
+			# matched any single day.
+			kfw_check_day() {
+				d="$1"
+				[ -n "$d" ] || return 0
+				days_listed=1
+				[ "$d" = "$now_dow_token" ] && day_ok=1
+			}
+			config_list_foreach "$rsec" days kfw_check_day
+			# no days configured at all => rule applies every day
+			[ "$days_listed" = 0 ] && day_ok=1
+
+			if [ "$day_ok" = 1 ]; then
+				start_time=$(uci -q get kidsfirewall.$rsec.start_time)
+				stop_time=$(uci -q get kidsfirewall.$rsec.stop_time)
+				if start_min=$(kfw_time_to_minutes "$start_time") && \
+				   stop_min=$(kfw_time_to_minutes "$stop_time"); then
+					if kfw_in_window "$start_min" "$stop_min" "$now_min"; then
+						kfw_set_del schedule_blocked "$mac"
+					else
+						kfw_set_add schedule_blocked "$mac"
+					fi
+				else
+					kfw_log "rule $rsec: invalid start_time/stop_time ('$start_time'/'$stop_time'), skipping this tick"
+				fi
+			else
+				# not a restricted day for this rule -> no restriction today
+				kfw_set_del schedule_blocked "$mac"
+			fi
+			;;
+		budget)
+			svc=$(uci -q get kidsfirewall.$rsec.service)
+			[ -n "$svc" ] || continue
+			sid=$(kfw_ident "$svc")
+			did=$(kfw_ident "$devid")
+			cname="usage_${did}_${sid}"
+			blockset="block_${sid}"
+
+			limit_minutes=$(uci -q get kidsfirewall.$rsec.limit_minutes)
+			case "$limit_minutes" in ''|*[!0-9]*) limit_minutes=0 ;; esac
+			period=$(uci -q get kidsfirewall.$rsec.period)
+			[ "$period" = weekly ] && stamp=$(kfw_week_stamp) || stamp=$(kfw_today_stamp)
+
+			statefile="$KFW_USAGE_DIR/${did}_${sid}.state"
+			cur_packets=$(kfw_counter_packets "$cname")
+			case "$cur_packets" in ''|*[!0-9]*) cur_packets=0 ;; esac
+
+			prev_stamp="" prev_seconds=0 prev_packets=0
+			if [ -f "$statefile" ]; then
+				read -r prev_stamp prev_seconds prev_packets < "$statefile"
+			fi
+			# guard against a truncated/corrupt state file (e.g. after an
+			# unclean shutdown) rather than letting bad data reach $(( ))
+			case "$prev_seconds" in ''|*[!0-9]*) prev_seconds=0 ;; esac
+			case "$prev_packets" in ''|*[!0-9]*) prev_packets=0 ;; esac
+
+			if [ "$prev_stamp" != "$stamp" ]; then
+				# new day/week: start this period's tally at zero, and
+				# reset the packet baseline so old traffic isn't credited
+				prev_seconds=0
+				prev_packets=$cur_packets
+			fi
+
+			if [ "$cur_packets" -gt "$prev_packets" ] 2>/dev/null; then
+				prev_seconds=$((prev_seconds + CHECK_INTERVAL))
+			fi
+			prev_packets=$cur_packets
+
+			echo "$stamp $prev_seconds $prev_packets" > "$statefile"
+
+			limit_seconds=$((limit_minutes * 60))
+			if [ "$limit_minutes" -gt 0 ] && [ "$prev_seconds" -ge "$limit_seconds" ]; then
+				kfw_set_add "$blockset" "$mac"
+			else
+				kfw_set_del "$blockset" "$mac"
+			fi
+			;;
+		esac
+	done
+}
+
+kfw_log "monitor daemon starting"
+while :; do
+	if kfw_table_exists; then
+		kfw_tick
+	fi
+	CHECK_INTERVAL=$(uci -q get kidsfirewall.global.check_interval)
+	case "$CHECK_INTERVAL" in ''|*[!0-9]*) CHECK_INTERVAL=60 ;; esac
+	sleep "$CHECK_INTERVAL"
+done

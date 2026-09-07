@@ -1,0 +1,17 @@
+{
+	"luci-app-kidsfirewall": {
+		"description": "Grant access to the Kids Firewall configuration page",
+		"read": {
+			"uci": [ "kidsfirewall", "dhcp" ],
+			"file": {
+				"/etc/init.d/kidsfirewall": [ "exec" ]
+			}
+		},
+		"write": {
+			"uci": [ "kidsfirewall" ],
+			"file": {
+				"/etc/init.d/kidsfirewall": [ "exec" ]
+			}
+		}
+	}
+}
