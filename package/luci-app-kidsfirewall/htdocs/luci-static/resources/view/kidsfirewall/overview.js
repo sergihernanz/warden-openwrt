@@ -37,6 +37,20 @@ return view.extend({
 			_('The devices (by MAC address) you want to apply rules to.'));
 		s.anonymous = true;
 		s.addremove = true;
+		// Anonymous sections display without the "type a UCI identifier"
+		// prompt, but their auto-generated cfgXXXXXXXX id is only a
+		// positional counter -- adding/removing ANY anonymous section
+		// elsewhere in the file can silently reassign it, orphaning any
+		// rule that references it by that id (confirmed on a real router:
+		// rules pointed at ids that no longer matched anything after
+		// routine edits). Overriding handleAdd creates a genuinely NAMED
+		// section instead (stable forever) with an auto-generated id, so
+		// there's still no identifier-typing prompt, but nothing can drift.
+		s.handleAdd = function(ev) {
+			var name = 'dev_' + Math.random().toString(36).slice(2, 10);
+			this.map.data.add(this.uciconfig || this.map.config, this.sectiontype, name);
+			return this.map.save(null, true);
+		};
 
 		o = s.option(form.Value, 'name', _('Name'));
 		o.rmempty = false;
@@ -56,6 +70,12 @@ return view.extend({
 			  'Ships with common defaults; add your own as needed.'));
 		s.anonymous = true;
 		s.addremove = true;
+		// same stable-naming fix as the Devices section above
+		s.handleAdd = function(ev) {
+			var name = 'svc_' + Math.random().toString(36).slice(2, 10);
+			this.map.data.add(this.uciconfig || this.map.config, this.sectiontype, name);
+			return this.map.save(null, true);
+		};
 
 		o = s.option(form.Value, 'name', _('Name'));
 		o.rmempty = false;
