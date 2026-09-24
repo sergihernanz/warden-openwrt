@@ -78,6 +78,7 @@ ssh "$ROUTER" <<'REMOTE'
 chmod +x /etc/init.d/kidsfirewall \
          /usr/sbin/kidsfirewall-genrules \
          /usr/sbin/kidsfirewall-monitor \
+         /usr/sbin/kidsfirewall-safe-dns-reapply \
          /etc/uci-defaults/95-kidsfirewall
 
 ( . /etc/uci-defaults/95-kidsfirewall ) && rm -f /etc/uci-defaults/95-kidsfirewall

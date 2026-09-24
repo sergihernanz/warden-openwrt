@@ -29,6 +29,35 @@ kfw_table_exists() {
 	nft list table inet "$KFW_TABLE" >/dev/null 2>&1
 }
 
+# Safe DNS drift check: independent of global.enabled/the nft table (Safe
+# DNS is a separate feature from the per-device block/budget/schedule
+# enforcement), so this is called unconditionally every tick, not gated by
+# kfw_table_exists like the rest of kfw_tick. Never modifies dhcp/dnsmasq
+# config itself -- only kidsfirewall-genrules (on an explicit apply) does
+# that; this purely reports current status for the LuCI page to display.
+kfw_check_safe_dns() {
+	config_load kidsfirewall
+	desired=$(uci -q get kidsfirewall.global.safe_dns)
+	[ -n "$desired" ] || desired="off"
+
+	mkdir -p "$KFW_RUN_DIR"
+
+	if [ "$desired" = "off" ]; then
+		echo "off:$desired" > "$KFW_SAFE_DNS_STATUS_FILE"
+		return
+	fi
+
+	expected=$(kfw_safe_dns_servers "$desired" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+	actual_servers=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+	actual_noresolv=$(uci -q get dhcp.@dnsmasq[0].noresolv 2>/dev/null)
+
+	if [ -n "$expected" ] && [ "$actual_noresolv" = "1" ] && [ "$actual_servers" = "$expected" ]; then
+		echo "ok:$desired" > "$KFW_SAFE_DNS_STATUS_FILE"
+	else
+		echo "drifted:$desired" > "$KFW_SAFE_DNS_STATUS_FILE"
+	fi
+}
+
 kfw_tick() {
 	config_load kidsfirewall
 
@@ -145,6 +174,7 @@ kfw_tick() {
 
 kfw_log "monitor daemon starting"
 while :; do
+	kfw_check_safe_dns
 	if kfw_table_exists; then
 		kfw_tick
 	fi

@@ -50,6 +50,7 @@ define Package/kidsfirewall/install
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) ./files/usr/sbin/kidsfirewall-genrules $(1)/usr/sbin/kidsfirewall-genrules
 	$(INSTALL_BIN) ./files/usr/sbin/kidsfirewall-monitor $(1)/usr/sbin/kidsfirewall-monitor
+	$(INSTALL_BIN) ./files/usr/sbin/kidsfirewall-safe-dns-reapply $(1)/usr/sbin/kidsfirewall-safe-dns-reapply
 
 	$(INSTALL_DIR) $(1)/usr/share/kidsfirewall
 	$(INSTALL_DATA) ./files/usr/share/kidsfirewall/functions.sh $(1)/usr/share/kidsfirewall/functions.sh

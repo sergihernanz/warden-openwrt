@@ -139,8 +139,9 @@ package/
     files/etc/init.d/kidsfirewall    procd service: generates + loads ruleset,
                                       supervises the monitor daemon
     files/etc/uci-defaults/95-*      first-boot defaults (enables dnsmasq confdir)
-    files/usr/sbin/kidsfirewall-genrules   UCI -> nft ruleset + dnsmasq snippet
-    files/usr/sbin/kidsfirewall-monitor    schedule + budget enforcement loop
+    files/usr/sbin/kidsfirewall-genrules   UCI -> nft ruleset + dnsmasq snippet + Safe DNS apply
+    files/usr/sbin/kidsfirewall-monitor    schedule + budget enforcement loop + Safe DNS drift check
+    files/usr/sbin/kidsfirewall-safe-dns-reapply  forces a Safe DNS re-apply (LuCI "Reapply" button)
     files/usr/share/kidsfirewall/functions.sh   shared shell helpers
   luci-app-kidsfirewall/             LuCI web UI (JS form.js view over the same UCI config;
                                       no Lua/ucode runtime required — runs client-side, talks
@@ -176,6 +177,51 @@ config rule
 	list days 'mon' 'tue' 'wed' 'thu' 'fri'   # mode=schedule, default = all days
 ```
 
+## Safe DNS (network-wide filtered upstream resolver)
+
+Separate feature from the per-device block/budget/schedule rules above:
+`global.safe_dns` (`off` / `cleanbrowsing` / `opendns` / `cloudflare` /
+`custom`, the last backed by `global.safe_dns_server`) points dnsmasq's
+*entire* upstream resolution at a filtering DNS provider
+(`dhcp.@dnsmasq[0].noresolv=1` + `dhcp.@dnsmasq[0].server=...`), for
+household-wide content filtering independent of which devices have
+`kidsfirewall` rules. It composes fine with the rest of the package: the
+per-device enforcement matches on whatever IP a domain resolves to,
+regardless of which upstream answered it.
+
+**Apply-once, not continuously enforced.** `kidsfirewall-genrules` only
+writes to `dhcp`/dnsmasq when `global.safe_dns` actually *changes* — it
+tracks the last-applied provider in `/etc/kidsfirewall/safe_dns.state`
+(persistent, unlike `/var/run`) and does nothing if the desired value
+already matches that marker. If an admin manually edits the DHCP/DNS
+config afterwards (or misconfigures it), `kidsfirewall-genrules` will
+**not** silently overwrite it back on the next unrelated config save —
+that would be surprising and could fight a deliberate manual change. This
+was a deliberate design choice matching how the feature was asked for:
+detect and surface drift, never silently auto-correct it.
+
+**Drift detection.** `kidsfirewall-monitor` already runs a tick loop for
+schedule/budget enforcement; it also re-checks every tick (independent of
+`global.enabled`/the nft table, since Safe DNS is a separate feature) 
+whether the live `dhcp.@dnsmasq[0].server`/`noresolv` still matches what
+`global.safe_dns` implies, writing `<off|ok|drifted>:<provider>` to
+`/var/run/kidsfirewall/safe_dns_status`. The LuCI page reads this file
+(via the `fs` capability) and shows a warning banner when it says
+`drifted`, alongside a "Reapply now" button.
+
+**Reapply mechanism.** The LuCI button doesn't have (and isn't given) a
+generic file-delete or arbitrary-exec capability — it calls one narrowly
+single-purposed script, `kidsfirewall-safe-dns-reapply`, which clears the
+state marker and re-runs `kidsfirewall-genrules` (which then sees
+`desired != applied` and re-applies).
+
+Turning Safe DNS back to `off` reverts `noresolv` to whatever it was
+*before* `kidsfirewall` ever touched it (also tracked in the state file)
+and removes the server list it added — it does not try to preserve any
+unrelated `server=` entries an admin might have had configured
+alongside it before enabling Safe DNS, since enabling it is explicitly a
+"replace DNS forwarding with this filtered resolver" action.
+
 ## Known limitations (documented, not silently hidden)
 
 - Requires the flat default `br-lan` bridge; routed/VLAN-isolated kid
@@ -210,3 +256,15 @@ config rule
   nft-only for both `block` and `budget` modes, which was always
   sufficient on its own since the nft rule already scopes correctly by
   `ether saddr`.
+- **Safe DNS is network-wide, not per-device** — there's no equivalent of
+  the per-MAC scoping the rest of the package does, since dnsmasq can't
+  answer differently per client for the same query (see the `address=`
+  limitation above). Providers also filter more than adult content:
+  CleanBrowsing/OpenDNS/Cloudflare Family variants typically also block
+  known VPN/proxy services (to prevent bypass) and CleanBrowsing forces
+  SafeSearch on major search engines — worth knowing if an adult on the
+  network relies on a VPN or hits false-positive SafeSearch filtering.
+- **Safe DNS enforcement is DNS-only, same as everything else here** — a
+  device that hardcodes a different resolver or uses DoH/DoT bypasses it
+  entirely. Forcing all LAN DNS through the router (blocking manual
+  overrides) is a separate firewall-redirect measure, not implemented.

@@ -4,13 +4,16 @@
 		"read": {
 			"uci": [ "kidsfirewall", "dhcp" ],
 			"file": {
-				"/etc/init.d/kidsfirewall": [ "exec" ]
+				"/etc/init.d/kidsfirewall": [ "exec" ],
+				"/usr/sbin/kidsfirewall-safe-dns-reapply": [ "exec" ],
+				"/var/run/kidsfirewall/safe_dns_status": [ "read" ]
 			}
 		},
 		"write": {
 			"uci": [ "kidsfirewall" ],
 			"file": {
-				"/etc/init.d/kidsfirewall": [ "exec" ]
+				"/etc/init.d/kidsfirewall": [ "exec" ],
+				"/usr/sbin/kidsfirewall-safe-dns-reapply": [ "exec" ]
 			}
 		}
 	}

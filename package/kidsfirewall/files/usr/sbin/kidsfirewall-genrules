@@ -16,6 +16,79 @@ mkdir -p "$KFW_RUN_DIR" "$KFW_USAGE_DIR"
 
 config_load kidsfirewall
 
+# Safe DNS (network-wide filtered upstream resolver) is a separate feature
+# from the per-device block/budget/schedule enforcement below, and applies
+# regardless of global.enabled -- so it runs before that flag is checked.
+#
+# "Apply once" semantics: this only WRITES dhcp/dnsmasq config when
+# global.safe_dns actually differs from what we last applied (tracked in
+# $KFW_SAFE_DNS_STATE_FILE, which persists across reboots since /etc is on
+# the overlay, unlike /var/run). If an admin manually edits the DHCP/DNS
+# config afterwards, we deliberately do NOT silently overwrite it back on
+# the next run -- kidsfirewall-monitor's drift check surfaces that as a
+# warning in LuCI instead, and re-applying requires an explicit action
+# (kidsfirewall-safe-dns-reapply), never an implicit side effect of some
+# unrelated config save.
+kfw_apply_safe_dns() {
+	desired=$(uci -q get kidsfirewall.global.safe_dns)
+	[ -n "$desired" ] || desired="off"
+
+	applied=""
+	had_noresolv=""
+	if [ -f "$KFW_SAFE_DNS_STATE_FILE" ]; then
+		. "$KFW_SAFE_DNS_STATE_FILE"
+		applied="$SAFE_DNS_PROVIDER"
+		had_noresolv="$SAFE_DNS_HAD_NORESOLV"
+	fi
+	[ -n "$applied" ] || applied="off"
+
+	[ "$desired" = "$applied" ] && return 0
+
+	if [ "$desired" = "off" ]; then
+		# revert: restore noresolv to whatever it was before we ever
+		# touched it, and drop the server list we own
+		[ "$had_noresolv" = "1" ] || uci -q set dhcp.@dnsmasq[0].noresolv='0'
+		uci -q delete dhcp.@dnsmasq[0].server
+		uci commit dhcp
+		[ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq restart >/dev/null 2>&1
+		rm -f "$KFW_SAFE_DNS_STATE_FILE"
+		kfw_log "safe_dns: disabled, dhcp DNS forwarding reverted"
+		return 0
+	fi
+
+	servers=$(kfw_safe_dns_servers "$desired")
+	if [ -z "$servers" ]; then
+		kfw_log "safe_dns: '$desired' has no server list configured (custom with an empty list?), leaving dhcp untouched"
+		return 1
+	fi
+
+	# only capture the pre-existing noresolv state the FIRST time we ever
+	# engage (switching between providers later must not re-capture our
+	# own noresolv=1 as if it were pre-existing)
+	if [ ! -f "$KFW_SAFE_DNS_STATE_FILE" ]; then
+		cur_noresolv=$(uci -q get dhcp.@dnsmasq[0].noresolv)
+		[ "$cur_noresolv" = "1" ] && had_noresolv=1 || had_noresolv=0
+	fi
+
+	uci -q set dhcp.@dnsmasq[0].noresolv='1'
+	uci -q delete dhcp.@dnsmasq[0].server
+	echo "$servers" | while read -r s; do
+		[ -n "$s" ] || continue
+		uci add_list dhcp.@dnsmasq[0].server="$s"
+	done
+	uci commit dhcp
+	[ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq restart >/dev/null 2>&1
+
+	mkdir -p "$KFW_SAFE_DNS_STATE_DIR"
+	{
+		echo "SAFE_DNS_PROVIDER='$desired'"
+		echo "SAFE_DNS_HAD_NORESOLV='$had_noresolv'"
+	} > "$KFW_SAFE_DNS_STATE_FILE"
+
+	kfw_log "safe_dns: enabled ($desired)"
+}
+kfw_apply_safe_dns
+
 ENABLED=$(uci -q get kidsfirewall.global.enabled)
 [ -n "$ENABLED" ] || ENABLED=1
 
@@ -210,6 +283,32 @@ else
 	: > "$KFW_DNSMASQ_FILE.tmp"
 fi
 
+# Force DNS: redirects all LAN-originated port 53 (TCP+UDP) traffic back to
+# this router's own dnsmasq, regardless of what any device is configured to
+# use as its resolver -- closes the exact bypass a device pointed at an
+# external DNS server (e.g. a manually-configured public resolver) would
+# otherwise have, which is invisible to every other part of this system
+# (nftset population, Safe DNS, per-device blocking all depend on the
+# lookup actually going through this router's dnsmasq). Unlike Safe DNS,
+# this touches nothing outside our own self-owned nft table -- no dhcp
+# config, no state file, no drift detection needed: it's simply included
+# in the freshly (re)generated ruleset or not, like every block/budget
+# rule already works. Does NOT catch DNS-over-HTTPS (indistinguishable
+# from ordinary HTTPS traffic without deep packet inspection) -- see
+# ARCHITECTURE.md.
+FORCE_DNS=$(uci -q get kidsfirewall.global.force_dns)
+[ "$FORCE_DNS" = "1" ] || FORCE_DNS=0
+FORCE_DNS_CHAIN=""
+if [ "$FORCE_DNS" = "1" ]; then
+	FORCE_DNS_CHAIN="
+	chain force_dns {
+		type nat hook prerouting priority dstnat - 5;
+		iifname \"br-lan\" tcp dport 53 redirect
+		iifname \"br-lan\" udp dport 53 redirect
+	}"
+	kfw_log "force_dns: enabled, redirecting all br-lan port 53 traffic to this router"
+fi
+
 {
 	echo "table inet $KFW_TABLE {"
 	echo "	set schedule_blocked { type ether_addr; }"
@@ -221,6 +320,7 @@ fi
 	echo "$BLOCK_RULES"
 	echo "$COUNT_RULES"
 	echo "	}"
+	echo "$FORCE_DNS_CHAIN"
 	echo "}"
 } > "$KFW_NFT_FILE.tmp"
 

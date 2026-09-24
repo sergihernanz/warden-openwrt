@@ -87,8 +87,15 @@ install or tracking down unexpected behavior.
 ## Usage
 
 1. Open **Network > Kids Firewall** in LuCI.
-2. Add a **Device**: a friendly name + MAC address (the MAC picker is
-   pre-populated from the router's current ARP table, or type one in).
+2. Add a **Device**: a friendly name + MAC address. The MAC field suggests
+   devices the router already knows about (hostname/IP shown alongside) —
+   click one, or type a MAC manually if yours isn't listed (can happen for
+   an IPv6-only device the router hasn't resolved a link-layer address
+   for yet; check `ip -6 neighbor show` on the router, or look for the
+   same device's IPv4 lease instead). Note some phones/laptops use a
+   randomized "Private Wi-Fi Address" per network by default, which is
+   what actually needs to go here, not necessarily the hardware MAC
+   printed on the device — and it can rotate over time.
 3. (Optional) Add/edit **Services** — a handful of common ones ship by
    default (Instagram, TikTok, YouTube, Facebook, Snapchat, Roblox, Twitch,
    Netflix), each just a name + list of domains.
@@ -98,7 +105,13 @@ install or tracking down unexpected behavior.
    - `Schedule`: pick allowed hours (`start`/`stop`) and, optionally, which
      days it applies to (empty = every day). Applies to the whole device,
      not a single service.
-5. **Save & Apply**.
+5. (Optional) **Safe DNS**: pick a filtered upstream DNS provider
+   (CleanBrowsing, OpenDNS FamilyShield, Cloudflare for Families, or a
+   custom resolver) to filter adult content for the *whole network*,
+   independent of the per-device rules above. If the page shows a warning
+   that it's drifted from what's actually configured (e.g. someone edited
+   DHCP/DNS settings directly), use the "Reapply now" button.
+6. **Save & Apply**.
 
 Command-line equivalent: edit `/etc/config/kidsfirewall` directly, then
 `/etc/init.d/kidsfirewall reload` (or just `uci commit kidsfirewall` if
@@ -107,7 +120,8 @@ you're going through LuCI/ucitrack).
 Debugging: `logread | grep kidsfirewall` for the ruleset generator and
 monitor daemon's own log lines, `nft list table inet kidsfirewall` to
 inspect the live ruleset/sets/counters, `nft list counter inet kidsfirewall
-usage_<device>_<service>` to see raw traffic counts feeding a budget.
+usage_<device>_<service>` to see raw traffic counts feeding a budget,
+`cat /var/run/kidsfirewall/safe_dns_status` for the Safe DNS drift check.
 
 ## What this deliberately does not do yet
 

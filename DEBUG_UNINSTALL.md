@@ -9,7 +9,20 @@ undoing and how to double-check it worked.
 ROUTER=root@192.168.1.1   # your router's LAN IP
 ```
 
-## 1. Stop and disable the service
+## 1. Revert Safe DNS first, if you enabled it
+
+Do this **before** removing `kidsfirewall-genrules` below — reverting
+relies on it to correctly restore `dhcp.@dnsmasq[0].noresolv` to whatever
+it was before Safe DNS ever touched it, not just blindly unset it:
+
+```sh
+ssh "$ROUTER" "uci set kidsfirewall.global.safe_dns=off; uci commit kidsfirewall; /usr/sbin/kidsfirewall-genrules"
+```
+
+Skip this if you never enabled Safe DNS (`uci get kidsfirewall.global.safe_dns`
+prints `off` or nothing).
+
+## 2. Stop and disable the service
 
 This removes the live nftables table and the boot-enablement symlinks
 (Categories 3 and 4 in DEBUG_AUDIT.md):
@@ -28,7 +41,7 @@ ssh "$ROUTER" "nft list table inet kidsfirewall"   # should error: No such file 
 ssh "$ROUTER" "ls /etc/rc.d/ | grep kidsfirewall"  # should print nothing
 ```
 
-## 2. Clean up dnsmasq
+## 3. Clean up dnsmasq
 
 `stop_service` already removes `/tmp/dnsmasq.d/kidsfirewall.conf` and
 reloads dnsmasq, but a full restart is a safer way to guarantee nothing
@@ -41,7 +54,7 @@ rm -f /tmp/dnsmasq.d/kidsfirewall.conf
 REMOTE
 ```
 
-## 3. Remove the installed files
+## 4. Remove the installed files
 
 ```sh
 ssh "$ROUTER" <<'REMOTE'
@@ -49,12 +62,14 @@ rm -f  /etc/init.d/kidsfirewall
 rm -f  /etc/uci-defaults/95-kidsfirewall
 rm -f  /usr/sbin/kidsfirewall-genrules
 rm -f  /usr/sbin/kidsfirewall-monitor
+rm -f  /usr/sbin/kidsfirewall-safe-dns-reapply
 rm -rf /usr/share/kidsfirewall
 rm -f  /usr/share/luci/menu.d/luci-app-kidsfirewall.json
 rm -f  /usr/share/rpcd/acl.d/luci-app-kidsfirewall.json
 rm -f  /usr/share/ucitrack/kidsfirewall.json
 rm -rf /www/luci-static/resources/view/kidsfirewall
 rm -rf /var/run/kidsfirewall
+rm -rf /etc/kidsfirewall
 REMOTE
 ```
 
@@ -66,7 +81,7 @@ to reinstall later and pick up where you left off. If you want it gone too:
 ssh "$ROUTER" "rm -f /etc/config/kidsfirewall"
 ```
 
-## 4. Decide about the dnsmasq `confdir` setting
+## 5. Decide about the dnsmasq `confdir` setting
 
 This package may have set `option confdir '/tmp/dnsmasq.d'` on
 `dhcp.@dnsmasq[0]` if it wasn't already set (see DEBUG_AUDIT.md Category 2).
@@ -87,13 +102,13 @@ ssh "$ROUTER" "uci get dhcp.@dnsmasq[0].confdir"
 ssh "$ROUTER" "uci delete dhcp.@dnsmasq[0].confdir; uci commit dhcp; /etc/init.d/dnsmasq restart"
 ```
 
-## 5. Clear LuCI's cache
+## 6. Clear LuCI's cache
 
 ```sh
 ssh "$ROUTER" "rm -f /tmp/luci-indexcache*; /etc/init.d/rpcd restart"
 ```
 
-## 6. Final check
+## 7. Final check
 
 Re-run the `audit.sh` script from DEBUG_AUDIT.md and confirm everything
 under "files", "nft table", and "rc.d boot symlinks" is now absent:

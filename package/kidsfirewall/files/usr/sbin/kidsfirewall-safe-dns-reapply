@@ -1,0 +1,13 @@
+#!/bin/sh
+# Forces Safe DNS to be re-applied even though global.safe_dns hasn't
+# changed, for the "Reapply" button in LuCI after manual DHCP config drift.
+# kidsfirewall-genrules' apply-once logic otherwise only writes dhcp/dnsmasq
+# config on an actual change to global.safe_dns -- this clears the
+# last-applied marker so the next genrules run treats it as unapplied.
+# A dedicated single-purpose script rather than granting LuCI a generic
+# file-delete/exec capability.
+
+. /usr/share/kidsfirewall/functions.sh
+
+rm -f "$KFW_SAFE_DNS_STATE_FILE"
+exec /usr/sbin/kidsfirewall-genrules

@@ -2,6 +2,17 @@
 config global 'global'
 	option enabled '1'
 	option check_interval '60'
+	# Safe DNS: network-wide filtered upstream resolver, independent of
+	# global.enabled and of the per-device rules below.
+	#   off | cleanbrowsing | opendns | cloudflare | custom
+	option safe_dns 'off'
+	# only used when safe_dns is 'custom' -- one resolver IP per line
+	# list safe_dns_server '1.2.3.4'
+	# Force DNS: redirect all br-lan port 53 (TCP+UDP) traffic to this
+	# router's own dnsmasq, regardless of what any device is configured to
+	# use as its resolver. Closes the bypass a device with a manually-set
+	# external DNS server would otherwise have. Does not catch DNS-over-HTTPS.
+	option force_dns '0'
 
 # Example device — edit the mac (and add more 'device' sections) via LuCI
 # or by hand. Set enabled '0' or delete the block entirely once you've
@@ -54,6 +65,8 @@ config service 'netflix'
 	option name 'Netflix'
 	list domain 'netflix.com'
 	list domain 'nflxvideo.net'
+	list domain 'nflxext.com'
+	list domain 'netflix.net'
 
 # Example rule — disabled by default, shown for reference. Add real ones
 # through LuCI (Network > Kids Firewall) or by copying this block.

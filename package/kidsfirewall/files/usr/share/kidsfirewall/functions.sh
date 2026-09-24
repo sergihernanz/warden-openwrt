@@ -7,6 +7,9 @@ KFW_USAGE_DIR="$KFW_RUN_DIR/usage"
 KFW_TABLE="kidsfirewall"
 KFW_NFT_FILE="$KFW_RUN_DIR/ruleset.nft"
 KFW_DNSMASQ_FILE="/tmp/dnsmasq.d/kidsfirewall.conf"
+KFW_SAFE_DNS_STATE_DIR="/etc/kidsfirewall"
+KFW_SAFE_DNS_STATE_FILE="$KFW_SAFE_DNS_STATE_DIR/safe_dns.state"
+KFW_SAFE_DNS_STATUS_FILE="$KFW_RUN_DIR/safe_dns_status"
 
 kfw_log() {
 	logger -t kidsfirewall "$*"
@@ -26,6 +29,21 @@ kfw_mac_lower() {
 	echo "$1" | tr 'A-F' 'a-f'
 }
 
+# Strips a single leading zero (if any) from a 1-2 digit numeric string,
+# so it's safe to hand to $(( )) without misparsing as octal ("08"/"09"
+# are invalid octal digits and would otherwise blow up the expansion).
+# NOT using the "10#$var" base-prefix notation for this: that's a
+# bash/ksh arithmetic extension, not POSIX, and busybox ash on OpenWRT
+# does NOT implement it -- confirmed directly against the actual shell
+# (`ash: arithmetic syntax error` on literally `$((10#08))`) after two
+# separate "fixed" versions of this file kept guarding the wrong thing
+# (input validity) when the real problem was the syntax itself being
+# unsupported regardless of input.
+kfw_strip_leading_zero() {
+	v="${1#0}"
+	[ -n "$v" ] && echo "$v" || echo 0
+}
+
 # "HH:MM" -> minutes since midnight (0-1439). No validation beyond what
 # UCI/LuCI already enforce on input.
 # Prints minutes-since-midnight and returns 0 on a valid "H:MM"/"HH:MM"
@@ -37,10 +55,8 @@ kfw_time_to_minutes() {
 		[0-9]:[0-9][0-9]|[0-9][0-9]:[0-9][0-9]) ;;
 		*) return 1 ;;
 	esac
-	h="${1%%:*}"
-	m="${1##*:}"
-	h=$((10#$h))
-	m=$((10#$m))
+	h=$(kfw_strip_leading_zero "${1%%:*}")
+	m=$(kfw_strip_leading_zero "${1##*:}")
 	[ "$h" -le 23 ] && [ "$m" -le 59 ] || return 1
 	echo $((h * 60 + m))
 }
@@ -50,7 +66,9 @@ kfw_now_minutes() {
 	m=$(date +'%M')
 	case "$h" in ''|*[!0-9]*) h=0 ;; esac
 	case "$m" in ''|*[!0-9]*) m=0 ;; esac
-	echo $((10#$h * 60 + 10#$m))
+	h=$(kfw_strip_leading_zero "$h")
+	m=$(kfw_strip_leading_zero "$m")
+	echo $((h * 60 + m))
 }
 
 # 1=mon .. 7=sun, matching the 'mon'/'tue'/... tokens used in UCI 'days' lists
@@ -90,4 +108,38 @@ kfw_week_stamp() {
 	# once a week — %G/%V aren't reliably supported by musl's strftime),
 	# used as the reset boundary for period=weekly
 	date +'%Y-%U'
+}
+
+# One resolver address per line for the given Safe DNS provider, or
+# nothing for "off"/unknown. Shared between kidsfirewall-genrules (which
+# writes these to dhcp/dnsmasq) and kidsfirewall-monitor (which checks
+# whether the live dhcp config still matches). Single source of truth so
+# the two can never drift apart from each other.
+kfw_safe_dns_servers() {
+	case "$1" in
+	cleanbrowsing)
+		echo "185.228.168.168"
+		echo "185.228.169.168"
+		echo "2a0d:2a00:1::"
+		echo "2a0d:2a00:2::"
+		;;
+	opendns)
+		echo "208.67.222.123"
+		echo "208.67.220.123"
+		;;
+	cloudflare)
+		echo "1.1.1.3"
+		echo "1.0.0.3"
+		echo "2606:4700:4700::1113"
+		echo "2606:4700:4700::1003"
+		;;
+	custom)
+		# config_list_foreach, not `uci get ... | while read`: uci get on
+		# a list option prints values space-joined on one line on this
+		# build rather than one per line (see kidsfirewall-genrules'
+		# domain/cidr handling for the bug this caused there).
+		kfw_collect_custom_dns() { [ -n "$1" ] && echo "$1"; }
+		config_list_foreach global safe_dns_server kfw_collect_custom_dns
+		;;
+	esac
 }

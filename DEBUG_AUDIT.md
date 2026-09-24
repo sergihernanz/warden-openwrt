@@ -29,6 +29,7 @@ Nothing here should have existed before install. Full list:
 /etc/init.d/kidsfirewall
 /usr/sbin/kidsfirewall-genrules
 /usr/sbin/kidsfirewall-monitor
+/usr/sbin/kidsfirewall-safe-dns-reapply
 /usr/share/kidsfirewall/functions.sh
 /usr/share/luci/menu.d/luci-app-kidsfirewall.json
 /usr/share/rpcd/acl.d/luci-app-kidsfirewall.json
@@ -44,6 +45,7 @@ Check they're all present and look at them directly:
 ```sh
 ssh "$ROUTER" 'for f in /etc/config/kidsfirewall /etc/init.d/kidsfirewall \
   /usr/sbin/kidsfirewall-genrules /usr/sbin/kidsfirewall-monitor \
+  /usr/sbin/kidsfirewall-safe-dns-reapply \
   /usr/share/kidsfirewall/functions.sh \
   /usr/share/luci/menu.d/luci-app-kidsfirewall.json \
   /usr/share/rpcd/acl.d/luci-app-kidsfirewall.json \
@@ -53,7 +55,7 @@ ssh "$ROUTER" 'for f in /etc/config/kidsfirewall /etc/init.d/kidsfirewall \
 done'
 ```
 
-## Category 2 — the one existing config file this package *modifies*
+## Category 2 — the existing config file(s) this package *modifies*
 
 `/etc/config/dhcp`: if the `dnsmasq` section didn't already have a
 `confdir` option set, `95-kidsfirewall` (uci-defaults, run once) and
@@ -63,18 +65,36 @@ done'
 option confdir '/tmp/dnsmasq.d'
 ```
 
-This is the *only* pre-existing config file touched. Check it:
+This is otherwise the *only* pre-existing config file touched, **unless**
+you've enabled **Safe DNS** (`global.safe_dns` != `off`) — in that case
+`kidsfirewall-genrules` also sets on the same `dhcp.@dnsmasq[0]` section:
 
-```sh
-ssh "$ROUTER" "uci get dhcp.@dnsmasq[0].confdir"
+```
+option noresolv '1'
+list server '<provider's resolver IPs>'
 ```
 
-If that prints `/tmp/dnsmasq.d` and you don't remember it being there
+only when `global.safe_dns` actually changes (see ARCHITECTURE.md's Safe
+DNS section for the apply-once/drift-detection design) — check the current
+state with `uci show kidsfirewall.global.safe_dns`, and what was actually
+last applied with `cat /etc/kidsfirewall/safe_dns.state` (this file
+persists across reboots, unlike `/var/run`).
+
+Check the dhcp config directly:
+
+```sh
+ssh "$ROUTER" "uci get dhcp.@dnsmasq[0].confdir; uci get dhcp.@dnsmasq[0].noresolv; uci get dhcp.@dnsmasq[0].server"
+```
+
+If `confdir` prints `/tmp/dnsmasq.d` and you don't remember it being there
 before, this package set it. It's a fairly benign, commonly-used setting
 (other packages like adblock/simple-adblock rely on the same option), but
 if you want it gone: `uci delete dhcp.@dnsmasq[0].confdir; uci commit dhcp;
 /etc/init.d/dnsmasq restart` — only do this if nothing else on your router
-now depends on `/tmp/dnsmasq.d` too.
+now depends on `/tmp/dnsmasq.d` too. To revert Safe DNS specifically, set
+`global.safe_dns` back to `off` in LuCI/UCI (do NOT just manually clear
+`noresolv`/`server` yourselves — that leaves the state marker out of sync
+and the LuCI page will report it as "drifted").
 
 **Nothing else is modified.** In particular, `/etc/config/firewall` is
 never touched — confirm that directly:
@@ -85,9 +105,10 @@ ssh "$ROUTER" "uci show firewall | grep -i kidsfirewall"   # should print nothin
 
 **Is your dnsmasq the full-featured build?** Worth checking regardless of
 whether anything looks broken — the minimal `dnsmasq` package (OpenWRT's
-default) lacks `nftset=` support, which degrades budget-mode accounting and
-the nft-level block backstop (block-mode DNS blocking still works fine
-either way):
+default) lacks `nftset=` support, which means block/budget rules have
+nothing to match against unless you manually populate a static CIDR per
+service (Safe DNS is unaffected by this either way, since it's plain
+`server=`/`noresolv=`, not `nftset=`):
 
 ```sh
 ssh "$ROUTER" "dnsmasq --version | grep 'compile time options'"
@@ -133,6 +154,7 @@ None of these are meant to be permanent, but worth knowing they exist:
 ```sh
 ssh "$ROUTER" "ls -la /var/run/kidsfirewall/ /var/run/kidsfirewall/usage/ 2>&1"
 ssh "$ROUTER" "cat /tmp/dnsmasq.d/kidsfirewall.conf 2>&1"
+ssh "$ROUTER" "cat /var/run/kidsfirewall/safe_dns_status 2>&1"
 ssh "$ROUTER" "ls /tmp/luci-indexcache* 2>&1"
 ```
 
@@ -140,11 +162,21 @@ ssh "$ROUTER" "ls /tmp/luci-indexcache* 2>&1"
   your own debugging; not re-read on boot, regenerated fresh each start)
 - `/var/run/kidsfirewall/usage/*.state` — per-device/service time-budget
   tally (`period_stamp seconds_used last_packet_count`)
+- `/var/run/kidsfirewall/safe_dns_status` — Safe DNS drift-check result
+  (`<off|ok|drifted>:<provider>`), refreshed every monitor tick, read by
+  the LuCI page to show its warning banner
 - `/tmp/dnsmasq.d/kidsfirewall.conf` — `nftset=` lines that keep the
   `dest_<service>` nft sets populated from DNS lookups (not per-device;
   device-level scoping happens entirely in the nft rules, not in dnsmasq)
 - `/tmp/luci-indexcache*` — LuCI's own menu cache, unrelated to this
   package's data but cleared by its install/uninstall steps
+
+**Not ephemeral, unlike the above:** `/etc/kidsfirewall/safe_dns.state`
+persists across reboots on purpose — it's the Safe DNS apply-once marker
+(which provider was last actually applied, and whether `noresolv` was
+already `1` before kidsfirewall touched it, so disabling Safe DNS later
+can restore it correctly). `cat /etc/kidsfirewall/safe_dns.state` to see
+it; it's removed automatically when Safe DNS is turned back to `off`.
 
 ## Category 6 — logs
 
@@ -165,6 +197,7 @@ echo "== files =="
 for f in /etc/config/kidsfirewall /etc/init.d/kidsfirewall \
   /etc/uci-defaults/95-kidsfirewall \
   /usr/sbin/kidsfirewall-genrules /usr/sbin/kidsfirewall-monitor \
+  /usr/sbin/kidsfirewall-safe-dns-reapply \
   /usr/share/kidsfirewall/functions.sh \
   /usr/share/luci/menu.d/luci-app-kidsfirewall.json \
   /usr/share/rpcd/acl.d/luci-app-kidsfirewall.json \
@@ -173,8 +206,14 @@ for f in /etc/config/kidsfirewall /etc/init.d/kidsfirewall \
     ls -la "$f" 2>&1
 done
 
-echo "== dhcp confdir =="
+echo "== dhcp confdir / safe dns forwarding =="
 uci get dhcp.@dnsmasq[0].confdir 2>&1
+uci get dhcp.@dnsmasq[0].noresolv 2>&1
+uci get dhcp.@dnsmasq[0].server 2>&1
+
+echo "== kidsfirewall safe_dns setting vs last-applied state =="
+uci get kidsfirewall.global.safe_dns 2>&1
+cat /etc/kidsfirewall/safe_dns.state 2>&1
 
 echo "== dnsmasq nftset support =="
 dnsmasq --version 2>&1 | grep 'compile time options'
@@ -195,6 +234,7 @@ echo "== runtime state =="
 ls -la /var/run/kidsfirewall/ 2>&1
 ls -la /var/run/kidsfirewall/usage/ 2>&1
 cat /tmp/dnsmasq.d/kidsfirewall.conf 2>&1
+cat /var/run/kidsfirewall/safe_dns_status 2>&1
 
 echo "== recent logs =="
 logread 2>/dev/null | grep kidsfirewall | tail -50
