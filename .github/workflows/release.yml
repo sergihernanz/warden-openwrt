@@ -27,7 +27,8 @@ jobs:
           set -e
           for f in dist/*.ipk; do
             echo "== $f =="
-            ar tv "$f"
+            file "$f"
+            tar tzvf "$f"
           done
 
       - name: Create GitHub Release
