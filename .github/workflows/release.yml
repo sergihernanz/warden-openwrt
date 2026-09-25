@@ -1,0 +1,39 @@
+name: Release
+
+# Builds real .ipk files (scripts/build-ipk.sh -- no OpenWRT SDK needed,
+# both packages are PKGARCH:=all) and attaches them to a GitHub Release
+# whenever a "v*" tag is pushed, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build .ipk packages
+        run: ./scripts/build-ipk.sh
+
+      - name: Verify built packages look sane
+        run: |
+          set -e
+          for f in dist/*.ipk; do
+            echo "== $f =="
+            ar tv "$f"
+          done
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/*.ipk \
+            --title "${{ github.ref_name }}" \
+            --notes "See README.md for install instructions (DEBUG_INSTALL.md for a manual-copy alternative that doesn't need opkg)."

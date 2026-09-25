@@ -4,3 +4,4 @@ staging_dir/
 dl/
 *.ipk
 .DS_Store
+dist/
