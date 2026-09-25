@@ -41,10 +41,40 @@ the "known limitations" section.
   parse (an unparseable directive here previously took down DNS for the
   whole LAN, not just kidsfirewall-managed devices — fixed).
 
+## Install
+
+**Easiest: grab the pre-built release.** Every `v*` tag automatically builds
+and publishes both `.ipk` files to
+[GitHub Releases](https://github.com/sergihernanz/warden-openwrt/releases/latest)
+via `.github/workflows/release.yml` — no SDK, no build step, and it's
+verified against a real `opkg-cl` build (see `scripts/build-ipk.sh`).
+Download the two files from there, then:
+
+```sh
+scp -O kidsfirewall_*.ipk luci-app-kidsfirewall_*.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/kidsfirewall_*.ipk /tmp/luci-app-kidsfirewall_*.ipk'
+```
+
+(`-O` forces the legacy scp protocol — modern OpenSSH defaults to SFTP, which
+OpenWRT's dropbear SSH daemon doesn't support.)
+
+Prefer to build it yourself, or skip opkg entirely (manual copy over SSH)?
+See "Building" below.
+
 ## Building
 
 This is laid out as an OpenWRT package feed (`package/kidsfirewall`,
-`package/luci-app-kidsfirewall`). Two ways to build it:
+`package/luci-app-kidsfirewall`). A few ways to build it:
+
+**Fastest: `scripts/build-ipk.sh`** — builds real `.ipk` files locally with
+just `tar`/`gzip` (no SDK needed, both packages are `PKGARCH:=all`). This is
+exactly what the release workflow runs:
+
+```sh
+./scripts/build-ipk.sh          # -> dist/*.ipk
+scp -O dist/*.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 'opkg install /tmp/kidsfirewall_*.ipk /tmp/luci-app-kidsfirewall_*.ipk'
+```
 
 **As a custom feed**, alongside the official OpenWRT/LuCI source in an
 OpenWRT buildroot:
@@ -65,24 +95,14 @@ this repo's `package/` directory the same way (symlink or `src-link`), and
 run the same `feeds`/`make package/.../compile` steps inside the SDK tree.
 
 Either way, the resulting `.ipk` files land under
-`bin/packages/<arch>/socialfirewall/`. Copy them to the router and install:
+`bin/packages/<arch>/socialfirewall/` instead of `dist/` — copy/install the
+same way as above.
 
-```sh
-scp -O kidsfirewall_*.ipk luci-app-kidsfirewall_*.ipk root@192.168.1.1:/tmp/
-ssh root@192.168.1.1 'opkg install /tmp/kidsfirewall_*.ipk /tmp/luci-app-kidsfirewall_*.ipk'
-```
-
-(`-O` forces the legacy scp protocol — modern OpenSSH defaults to SFTP, which
-OpenWRT's dropbear SSH daemon doesn't support; see DEBUG_INSTALL.md if this
-still fails.)
-
-Since both packages are `PKGARCH:=all` (no compiled code), you don't
-actually need the SDK just to try this on one router — see
-[DEBUG_INSTALL.md](DEBUG_INSTALL.md) for a copy-the-files-over-SSH
-shortcut, [DEBUG_UNINSTALL.md](DEBUG_UNINSTALL.md) to reverse it, and
-[DEBUG_AUDIT.md](DEBUG_AUDIT.md) for the exhaustive list (+ commands) of
-everything this package changes on the router, useful for verifying the
-install or tracking down unexpected behavior.
+Don't want opkg involved at all? See [DEBUG_INSTALL.md](DEBUG_INSTALL.md)
+for a copy-the-files-over-SSH shortcut, [DEBUG_UNINSTALL.md](DEBUG_UNINSTALL.md)
+to reverse it, and [DEBUG_AUDIT.md](DEBUG_AUDIT.md) for the exhaustive list
+(+ commands) of everything this package changes on the router, useful for
+verifying the install or tracking down unexpected behavior.
 
 ## Usage
 
